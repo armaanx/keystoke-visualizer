@@ -1,8 +1,8 @@
-use crate::model::{KeyCell, SessionData};
+use crate::model::{KeyCell, SessionSnapshot};
 use chrono::{DateTime, Local, Utc};
 use std::collections::BTreeMap;
 
-pub fn build_html_report(session: &SessionData) -> String {
+pub fn build_html_report(session: &SessionSnapshot) -> String {
     let duration_seconds = session
         .stopped_at
         .unwrap_or(session.last_updated_at)
@@ -24,11 +24,13 @@ pub fn build_html_report(session: &SessionData) -> String {
     let rows = table_items
         .into_iter()
         .map(|(key, count)| {
+            let share = percentage(*count, session.total_keypresses);
             format!(
-                "<tr><td>{}</td><td>{}</td><td>{:.2}%</td></tr>",
+                "<tr><td><div class=\"key-name\">{}</div></td><td>{}</td><td>{:.2}%<div class=\"share-bar\"><span style=\"width:{:.2}%\"></span></div></td></tr>",
                 html_escape(&pretty_key_name(key)),
                 count,
-                percentage(*count, session.total_keypresses)
+                share,
+                share
             )
         })
         .collect::<Vec<_>>()
@@ -42,31 +44,81 @@ pub fn build_html_report(session: &SessionData) -> String {
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title><style>
-:root{{--bg:#f7f1e7;--card:#fffdf8;--ink:#1f2328;--muted:#6b7280;--accent:#146c94;--line:#ded6c9}}
-*{{box-sizing:border-box}} body{{margin:0;font-family:"Segoe UI",system-ui,sans-serif;color:var(--ink);background:radial-gradient(circle at top left,#fffdf7 0,#fffdf7 20%,transparent 50%),linear-gradient(135deg,#f7f1e7,#f2e7d5)}}
-.wrap{{max-width:1200px;margin:0 auto;padding:32px 24px 56px}} h1,h2{{margin:0 0 12px}} .sub{{color:var(--muted);margin-bottom:24px}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px}}
-.card{{background:rgba(255,253,248,.9);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 10px 30px rgba(31,35,40,.06)}}
-.eyebrow{{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}} .big{{font-size:28px;font-weight:700;margin-top:8px}}
-.panels{{display:grid;grid-template-columns:1.2fr 1fr;gap:18px;margin-bottom:18px}} .wide{{grid-column:1/-1}}
-table{{width:100%;border-collapse:collapse}} th,td{{text-align:left;padding:10px 0;border-bottom:1px solid var(--line)}} th{{color:var(--muted);font-weight:600}}
-.note{{color:var(--muted);font-size:14px;margin-top:8px}} svg{{width:100%;height:auto;display:block}} @media (max-width:900px){{.panels{{grid-template-columns:1fr}}}}
+ :root{{--bg:#070b14;--bg2:#11192b;--card:#0f1728dd;--card-2:#131d33;--ink:#eef4ff;--muted:#90a1bf;--line:#25324b;--accent:#6ae2ff;--accent-2:#7d5cff;--accent-3:#4cf3a4;--shadow:0 20px 60px rgba(0,0,0,.38)}}
+ *{{box-sizing:border-box}}
+ body{{margin:0;font-family:"Aptos","Segoe UI Variable","Segoe UI",system-ui,sans-serif;color:var(--ink);background:
+ radial-gradient(circle at top left,rgba(125,92,255,.22),transparent 30%),
+ radial-gradient(circle at top right,rgba(106,226,255,.14),transparent 24%),
+ radial-gradient(circle at bottom center,rgba(76,243,164,.08),transparent 28%),
+ linear-gradient(180deg,var(--bg),var(--bg2) 70%,#09101d)}}
+ body::before{{content:"";position:fixed;inset:0;pointer-events:none;background:
+ linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),
+ linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);background-size:34px 34px;mask-image:linear-gradient(180deg,rgba(0,0,0,.75),transparent 92%);opacity:.18}}
+ .wrap{{max-width:1240px;margin:0 auto;padding:34px 22px 64px;position:relative}}
+ h1,h2{{margin:0}}
+ .hero{{position:relative;overflow:hidden;padding:28px;border-radius:30px;border:1px solid rgba(255,255,255,.08);background:
+ linear-gradient(135deg,rgba(19,29,51,.96),rgba(10,17,31,.92)),
+ radial-gradient(circle at top right,rgba(106,226,255,.18),transparent 32%);box-shadow:var(--shadow);margin-bottom:22px}}
+ .hero::after{{content:"";position:absolute;right:-120px;bottom:-160px;width:360px;height:360px;border-radius:999px;background:radial-gradient(circle,rgba(125,92,255,.26),transparent 70%)}}
+ .headline{{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;position:relative;z-index:1}}
+ .title-wrap{{max-width:780px}}
+ .kicker{{display:inline-flex;align-items:center;gap:10px;padding:8px 12px;border-radius:999px;background:rgba(106,226,255,.08);border:1px solid rgba(106,226,255,.18);text-transform:uppercase;letter-spacing:.14em;color:var(--accent);font-size:12px;margin-bottom:14px}}
+ .kicker::before{{content:"";width:8px;height:8px;border-radius:999px;background:var(--accent-3);box-shadow:0 0 18px rgba(76,243,164,.8)}}
+ h1{{font-size:clamp(30px,5vw,54px);line-height:1.02;letter-spacing:-.04em;margin-bottom:12px}}
+ .sub{{color:var(--muted);font-size:15px;line-height:1.65;max-width:720px}}
+ .session-pill{{min-width:190px;padding:16px 18px;border-radius:22px;border:1px solid rgba(255,255,255,.08);background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.03));backdrop-filter:blur(14px)}}
+ .session-label{{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.12em}}
+ .session-value{{font-size:25px;font-weight:750;margin-top:8px}}
+ .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px;margin-bottom:22px}}
+ .card{{position:relative;overflow:hidden;padding:20px;border-radius:24px;border:1px solid rgba(255,255,255,.08);background:linear-gradient(180deg,rgba(15,23,40,.96),rgba(9,15,27,.92));box-shadow:var(--shadow)}}
+ .card::before{{content:"";position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,rgba(106,226,255,.55),transparent 60%)}}
+ .metric-card{{min-height:146px}}
+ .eyebrow{{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.14em}}
+ .big{{font-size:37px;font-weight:760;line-height:1.05;letter-spacing:-.03em;margin-top:16px}}
+ .metric-foot{{margin-top:10px;color:var(--muted);font-size:13px;line-height:1.5}}
+ .panels{{display:grid;grid-template-columns:1.15fr .85fr;gap:18px}}
+ .wide{{grid-column:1/-1}}
+ .panel-head{{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:14px}}
+ .panel-copy{{color:var(--muted);font-size:13px;line-height:1.5;max-width:440px}}
+ .table-shell{{overflow:auto;border-radius:18px;border:1px solid rgba(255,255,255,.05);background:rgba(255,255,255,.02)}}
+ table{{width:100%;border-collapse:collapse;min-width:560px}}
+ th,td{{padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.06);text-align:left}}
+ th{{color:var(--muted);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.12em;background:rgba(255,255,255,.02)}}
+ td:nth-child(2),th:nth-child(2),td:last-child,th:last-child{{text-align:right}}
+ tbody tr:hover{{background:rgba(106,226,255,.05)}}
+ .key-name{{font-weight:600}}
+ .share-bar{{position:relative;height:8px;border-radius:999px;background:rgba(255,255,255,.06);overflow:hidden;margin-top:7px}}
+ .share-bar span{{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--accent-2),var(--accent));box-shadow:0 0 16px rgba(106,226,255,.22)}}
+ .note{{color:var(--muted);font-size:14px;margin-top:10px}}
+ svg{{width:100%;height:auto;display:block}}
+ @media (max-width:980px){{.headline{{flex-direction:column}}.session-pill{{width:100%}}.panels{{grid-template-columns:1fr}}}}
+ @media (max-width:720px){{.wrap{{padding:18px 14px 42px}}.hero{{padding:22px 18px}}.card{{padding:16px;border-radius:20px}}.big{{font-size:30px}}}}
 </style></head><body><div class="wrap">
-<h1>{title}</h1><div class="sub">Session {session_id} • {layout} • started {started} • stopped {stopped}</div>
+<section class="hero">
+<div class="headline">
+<div class="title-wrap">
+<div class="kicker">Keystroke Session Report</div>
+<h1>{title}</h1>
+<div class="sub">Session {session_id} • {layout} layout • started {started} • stopped {stopped}. All values come from local aggregate counts with no typed-text capture.</div>
+</div>
+<div class="session-pill"><div class="session-label">Session ID</div><div class="session-value">{short_session_id}</div></div>
+</div>
+</section>
 <div class="grid">
-<div class="card"><div class="eyebrow">Total Keypresses</div><div class="big">{total}</div></div>
-<div class="card"><div class="eyebrow">Unique Keys</div><div class="big">{unique}</div></div>
-<div class="card"><div class="eyebrow">Duration</div><div class="big">{duration}</div></div>
-<div class="card"><div class="eyebrow">Peak Minute</div><div class="big">{peak}</div></div>
+<div class="card metric-card"><div class="eyebrow">Total Keypresses</div><div class="big">{total}</div><div class="metric-foot">All press events counted across the session lifecycle.</div></div>
+<div class="card metric-card"><div class="eyebrow">Unique Keys</div><div class="big">{unique}</div><div class="metric-foot">Distinct key identities observed during capture.</div></div>
+<div class="card metric-card"><div class="eyebrow">Duration</div><div class="big">{duration}</div><div class="metric-foot">Measured from session start until stop or last recorded update.</div></div>
+<div class="card metric-card"><div class="eyebrow">Peak Minute</div><div class="big">{peak}</div><div class="metric-foot">The busiest minute bucket in the timeline.</div></div>
 </div>
 <div class="panels">
-<section class="card"><h2>Timeline</h2>{timeline_svg}<div class="note">Per-minute activity over the session.</div></section>
-<section class="card"><h2>Top Keys</h2>{bars_svg}<div class="note">Most frequently pressed keys.</div></section>
-<section class="card wide"><h2>Keyboard Heatmap</h2>{keyboard_svg}</section>
-<section class="card wide"><h2>Per-Key Table</h2><table><thead><tr><th>Key</th><th>Count</th><th>Share</th></tr></thead><tbody>{rows}</tbody></table></section>
+<section class="card"><div class="panel-head"><h2>Activity Timeline</h2><div class="panel-copy">A neon line plot of minute-by-minute activity, useful for spotting bursts and drop-offs.</div></div>{timeline_svg}<div class="note">This chart shows intensity per bucket rather than cumulative totals.</div></section>
+<section class="card"><div class="panel-head"><h2>Top Keys</h2><div class="panel-copy">Most frequent keys ranked by raw volume, normalized against the busiest key.</div></div>{bars_svg}<div class="note">Bars are scaled relative to the top entry.</div></section>
+<section class="card wide"><div class="panel-head"><h2>Keyboard Heatmap</h2><div class="panel-copy">Spatial activity view across the active keyboard layout.</div></div>{keyboard_svg}</section>
+<section class="card wide"><div class="panel-head"><h2>Per-Key Breakdown</h2><div class="panel-copy">Every captured key with both absolute count and session share.</div></div><div class="table-shell"><table><thead><tr><th>Key</th><th>Count</th><th>Share</th></tr></thead><tbody>{rows}</tbody></table></div></section>
 </div></div></body></html>"#,
         title = html_escape(&title),
         session_id = html_escape(&session.session_id),
+        short_session_id = html_escape(&session.session_id.chars().take(8).collect::<String>()),
         layout = session.layout.as_str(),
         started = format_local(session.started_at),
         stopped = session
@@ -93,7 +145,7 @@ fn render_keyboard_svg(counts: &BTreeMap<String, u64>) -> String {
         let text_x = key.x + key.w / 2.0;
         let text_y = key.y + key.h / 2.0 + 6.0;
         format!(
-            r##"<g><title>{tooltip}</title><rect x="{x}" y="{y}" rx="10" ry="10" width="{w}" height="{h}" fill="{fill}" stroke="#cabda7" stroke-width="1.4"/><text x="{text_x}" y="{text_y}" text-anchor="middle" fill="#1f2328" font-size="13" font-family="Segoe UI, sans-serif">{label}</text></g>"##,
+            r##"<g><title>{tooltip}</title><rect x="{x}" y="{y}" rx="12" ry="12" width="{w}" height="{h}" fill="{fill}" stroke="rgba(255,255,255,.16)" stroke-width="1.2"/><text x="{text_x}" y="{text_y}" text-anchor="middle" fill="#ecf2ff" font-size="13" font-family="Segoe UI, sans-serif">{label}</text></g>"##,
             tooltip = html_escape(&format!("{}: {}", key.label, count)),
             x = key.x, y = key.y, w = key.w, h = key.h, fill = heat_color(ratio), text_x = text_x, text_y = text_y, label = html_escape(key.label)
         )
@@ -110,11 +162,13 @@ fn render_top_keys_svg(top_keys: &[(String, u64)]) -> String {
         let y = 20.0 + index as f64 * 34.0;
         let width_px = ((*count as f64) / max) * 320.0;
         format!(
-            r##"<text x="0" y="{label_y}" fill="#6b7280" font-size="13" font-family="Segoe UI, sans-serif">{label}</text><rect x="110" y="{y}" width="{width_px}" height="24" rx="8" fill="#146c94"/><text x="{value_x}" y="{label_y}" fill="#1f2328" font-size="13" font-family="Segoe UI, sans-serif">{count}</text>"##,
+            r##"<text x="0" y="{label_y}" fill="#9eacc7" font-size="13" font-family="Segoe UI, sans-serif">{label}</text><rect x="110" y="{y}" width="320" height="24" rx="8" fill="rgba(255,255,255,.05)"/><rect x="110" y="{y}" width="{width_px}" height="24" rx="8" fill="url(#bar-gradient)"/><text x="{value_x}" y="{label_y}" fill="#eef4ff" font-size="13" font-family="Segoe UI, sans-serif">{count}</text>"##,
             label_y = y + 17.0, label = html_escape(&pretty_key_name(key)), y = y, width_px = width_px.max(8.0), value_x = 120.0 + width_px, count = count
         )
     }).collect::<Vec<_>>().join("");
-    format!(r#"<svg viewBox="0 0 520 460" role="img" aria-label="Top key chart">{body}</svg>"#)
+    format!(
+        r##"<svg viewBox="0 0 520 460" role="img" aria-label="Top key chart"><defs><linearGradient id="bar-gradient" x1="0%" x2="100%" y1="0%" y2="0%"><stop offset="0%" stop-color="#7d5cff"/><stop offset="100%" stop-color="#6ae2ff"/></linearGradient></defs>{body}</svg>"##
+    )
 }
 
 fn render_timeline_svg(buckets: &BTreeMap<String, u64>) -> String {
@@ -135,11 +189,11 @@ fn render_timeline_svg(buckets: &BTreeMap<String, u64>) -> String {
         let y = 20.0 + 220.0 - ((**count as f64 / max) * 220.0);
         polyline.push_str(&format!("{x},{y} "));
         if idx == 0 || idx == points.len() - 1 || idx % 5 == 0 {
-            labels.push_str(&format!(r##"<text x="{x}" y="285" text-anchor="middle" fill="#6b7280" font-size="11" font-family="Segoe UI, sans-serif">{label}</text>"##, x = x, label = html_escape(minute)));
+            labels.push_str(&format!(r##"<text x="{x}" y="285" text-anchor="middle" fill="#90a1bf" font-size="11" font-family="Segoe UI, sans-serif">{label}</text>"##, x = x, label = html_escape(minute)));
         }
     }
     format!(
-        r##"<svg viewBox="0 0 620 300" role="img" aria-label="Per-minute timeline"><line x1="50" y1="20" x2="50" y2="240" stroke="#cabda7"/><line x1="50" y1="240" x2="590" y2="240" stroke="#cabda7"/><polyline fill="none" stroke="#146c94" stroke-width="3" points="{points}"/>{labels}</svg>"##,
+        r###"<svg viewBox="0 0 620 300" role="img" aria-label="Per-minute timeline"><defs><linearGradient id="timeline-gradient" x1="0%" x2="100%" y1="0%" y2="0%"><stop offset="0%" stop-color="#7d5cff"/><stop offset="100%" stop-color="#6ae2ff"/></linearGradient><filter id="line-glow"><feGaussianBlur stdDeviation="4.5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><line x1="50" y1="20" x2="50" y2="240" stroke="rgba(255,255,255,.12)"/><line x1="50" y1="240" x2="590" y2="240" stroke="rgba(255,255,255,.12)"/><polyline fill="none" stroke="rgba(106,226,255,.25)" stroke-width="8" filter="url(#line-glow)" points="{points}"/><polyline fill="none" stroke="url(#timeline-gradient)" stroke-width="3.5" points="{points}"/>{labels}</svg>"###,
         points = polyline.trim_end(),
         labels = labels
     )
@@ -306,8 +360,8 @@ fn pretty_key_name(raw: &str) -> String {
 
 fn heat_color(ratio: f64) -> String {
     let ratio = ratio.clamp(0.0, 1.0);
-    let cold = (245.0, 239.0, 227.0);
-    let hot = (198.0, 40.0, 40.0);
+    let cold = (22.0, 32.0, 53.0);
+    let hot = (106.0, 226.0, 255.0);
     let r = cold.0 + (hot.0 - cold.0) * ratio;
     let g = cold.1 + (hot.1 - cold.1) * ratio;
     let b = cold.2 + (hot.2 - cold.2) * ratio;
@@ -316,7 +370,7 @@ fn heat_color(ratio: f64) -> String {
 
 fn empty_svg(message: &str) -> String {
     format!(
-        r##"<svg viewBox="0 0 520 220" role="img"><text x="50%" y="50%" text-anchor="middle" fill="#6b7280" font-size="16" font-family="Segoe UI, sans-serif">{}</text></svg>"##,
+        r##"<svg viewBox="0 0 520 220" role="img"><text x="50%" y="50%" text-anchor="middle" fill="#90a1bf" font-size="16" font-family="Segoe UI, sans-serif">{}</text></svg>"##,
         html_escape(message)
     )
 }
