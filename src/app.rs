@@ -2,16 +2,15 @@ use crate::collector::{
     DaemonContext, handle_event, load_collector_state, send_control_command, start_control_server,
     start_flush_worker,
 };
+use crate::assets::load_asset;
 use crate::model::{KeyboardLayout, SessionRecord, SessionSnapshot, SessionStatus};
-use crate::platform::{open_path, process_exists, spawn_daemon};
-use crate::report::build_html_report;
+use crate::platform::{process_exists, spawn_daemon};
 use crate::storage::{AppPaths, Repository, app_paths};
+use crate::web::serve_report_ui;
 use crate::{Cli, Commands};
 use anyhow::{Context, Result, bail};
 use chrono::{Local, Utc};
 use rdev::listen;
-use std::fs;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -107,18 +106,7 @@ fn stop_session(open_report: bool) -> Result<()> {
         }
     };
 
-    let mut repo = Repository::open(&paths)?;
-    let snapshot = repo.load_session_snapshot(&session_id)?;
-    let report_path = report_path(&paths, &session_id);
-    fs::create_dir_all(
-        report_path
-            .parent()
-            .context("resolving report parent directory")?,
-    )
-    .context("creating report directory")?;
-    fs::write(&report_path, build_html_report(&snapshot)).context("writing report")?;
-    repo.update_report_path(&session_id, &report_path)?;
-
+    let repo = Repository::open(&paths)?;
     let final_record = repo.load_session(&session_id)?;
     println!("Stopped session {}", session_id);
     println!(
@@ -130,31 +118,18 @@ fn stop_session(open_report: bool) -> Result<()> {
         "Clean shutdown: {}",
         yes_no(final_record.snapshot.clean_shutdown)
     );
-    println!("Report: {}", report_path.display());
     if open_report {
-        open_path(&report_path)?;
+        serve_report_ui(paths, &session_id, true)?;
+    } else {
+        println!("Run `keystroke-visualizer report {session_id} --open` to view the UI.");
     }
     Ok(())
 }
 
 fn render_existing_report(session_id: &str, open_report: bool) -> Result<()> {
     let paths = app_paths()?;
-    let mut repo = Repository::open(&paths)?;
-    let snapshot = repo.load_session_snapshot(session_id)?;
-    let report_path = report_path(&paths, session_id);
-    fs::create_dir_all(
-        report_path
-            .parent()
-            .context("resolving report parent directory")?,
-    )
-    .context("creating report directory")?;
-    fs::write(&report_path, build_html_report(&snapshot)).context("writing report")?;
-    repo.update_report_path(session_id, &report_path)?;
-    println!("Report: {}", report_path.display());
-    if open_report {
-        open_path(&report_path)?;
-    }
-    Ok(())
+    Repository::open(&paths)?.load_session_snapshot(session_id)?;
+    serve_report_ui(paths, session_id, open_report)
 }
 
 fn list_sessions() -> Result<()> {
@@ -203,6 +178,10 @@ fn doctor() -> Result<()> {
         yes_no(std::env::current_exe().is_ok())
     );
     println!("Capture backend: global keyboard hook via rdev");
+    println!(
+        "Frontend assets: {}",
+        yes_no(load_asset("index.html").is_some())
+    );
     println!(
         "Platform support: {}",
         if cfg!(windows) {
@@ -354,10 +333,6 @@ fn reconcile_active_session(repo: &mut Repository) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn report_path(paths: &AppPaths, session_id: &str) -> PathBuf {
-    paths.sessions_dir.join(session_id).join("report.html")
 }
 
 fn print_session_status(record: &SessionRecord) {

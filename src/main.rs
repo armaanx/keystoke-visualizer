@@ -1,9 +1,12 @@
 mod app;
+mod api;
+mod assets;
 mod collector;
 mod model;
 mod platform;
 mod report;
 mod storage;
+mod web;
 
 use anyhow::Result;
 use app::run;

@@ -55,11 +55,11 @@ pub fn process_exists(pid: u32) -> bool {
     }
 }
 
-pub fn open_path(path: &Path) -> Result<()> {
+pub fn open_target(target: &str) -> Result<()> {
     #[cfg(windows)]
     {
         Command::new("cmd")
-            .args(["/C", "start", "", &path.to_string_lossy()])
+            .args(["/C", "start", "", target])
             .spawn()
             .context("opening report in browser")?;
     }
@@ -67,7 +67,7 @@ pub fn open_path(path: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         Command::new("open")
-            .arg(path)
+            .arg(target)
             .spawn()
             .context("opening report in browser")?;
     }
@@ -75,7 +75,7 @@ pub fn open_path(path: &Path) -> Result<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         Command::new("xdg-open")
-            .arg(path)
+            .arg(target)
             .spawn()
             .context("opening report in browser")?;
     }

@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use directories::ProjectDirs;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const SCHEMA_VERSION: i64 = 1;
 
@@ -260,16 +260,6 @@ impl Repository {
         Ok(())
     }
 
-    pub fn update_report_path(&mut self, session_id: &str, report_path: &Path) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE sessions SET report_path = ?2 WHERE session_id = ?1",
-                params![session_id, report_path.to_string_lossy().to_string()],
-            )
-            .with_context(|| format!("updating report path for {}", session_id))?;
-        Ok(())
-    }
-
     pub fn load_session(&self, session_id: &str) -> Result<SessionRecord> {
         let snapshot = self.load_session_snapshot(session_id)?;
         let runtime = self.load_runtime(session_id)?;
@@ -395,12 +385,16 @@ impl Repository {
     }
 
     pub fn recent_sessions(&self) -> Result<Vec<SessionRecord>> {
+        self.recent_sessions_limit(100)
+    }
+
+    pub fn recent_sessions_limit(&self, limit: usize) -> Result<Vec<SessionRecord>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT session_id FROM sessions ORDER BY started_at DESC")
+            .prepare("SELECT session_id FROM sessions ORDER BY started_at DESC LIMIT ?1")
             .context("preparing recent sessions query")?;
         let ids = stmt
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map(params![limit as i64], |row| row.get::<_, String>(0))
             .context("querying recent sessions")?;
         let mut sessions = Vec::new();
         for id in ids {
