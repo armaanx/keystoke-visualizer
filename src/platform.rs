@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -12,12 +12,14 @@ const DETACHED_PROCESS: u32 = 0x00000008;
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
 
-pub fn spawn_daemon(executable: &Path, session_id: &str) -> Result<u32> {
+pub fn spawn_daemon(executable: &Path, session_id: &str, control_token: &str) -> Result<u32> {
     let mut command = Command::new(executable);
     command
         .arg("daemon")
         .arg("--session-id")
         .arg(session_id)
+        .arg("--control-token")
+        .arg(control_token)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -51,32 +53,6 @@ pub fn process_exists(pid: u32) -> bool {
             .map(|status| status.success())
             .unwrap_or(false)
     }
-}
-
-pub fn terminate_process(pid: u32) -> Result<()> {
-    #[cfg(windows)]
-    {
-        let status = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .status()
-            .context("terminating collector process")?;
-        if !status.success() {
-            bail!("taskkill failed for pid {}", pid);
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        let status = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status()
-            .context("terminating collector process")?;
-        if !status.success() {
-            bail!("kill failed for pid {}", pid);
-        }
-    }
-
-    Ok(())
 }
 
 pub fn open_path(path: &Path) -> Result<()> {

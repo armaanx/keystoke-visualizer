@@ -1,24 +1,21 @@
-use crate::model::{ActiveSession, CollectorState, KeyboardLayout, SessionData};
-use crate::platform::{open_path, process_exists, spawn_daemon, terminate_process};
+use crate::collector::{
+    DaemonContext, handle_event, load_collector_state, send_control_command, start_control_server,
+    start_flush_worker,
+};
+use crate::model::{KeyboardLayout, SessionRecord, SessionSnapshot, SessionStatus};
+use crate::platform::{open_path, process_exists, spawn_daemon};
 use crate::report::build_html_report;
+use crate::storage::{AppPaths, Repository, app_paths};
 use crate::{Cli, Commands};
 use anyhow::{Context, Result, bail};
 use chrono::{Local, Utc};
-use directories::ProjectDirs;
-use rdev::{Event, EventType, listen};
-use serde::{Deserialize, Serialize};
+use rdev::listen;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use uuid::Uuid;
-
-#[derive(Clone)]
-struct AppPaths {
-    sessions_dir: PathBuf,
-    active_session_path: PathBuf,
-}
 
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
@@ -27,37 +24,37 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Stop { open } => stop_session(open),
         Commands::Report { session_id, open } => render_existing_report(&session_id, open),
         Commands::List => list_sessions(),
-        Commands::Daemon { session_id } => daemon_loop(&session_id),
+        Commands::Doctor => doctor(),
+        Commands::Daemon {
+            session_id,
+            control_token,
+        } => daemon_loop(&session_id, &control_token),
     }
 }
 
 fn start_session(name: Option<String>, layout: KeyboardLayout) -> Result<()> {
     let paths = app_paths()?;
-    if let Some(active) = read_active_session(&paths)? {
-        if process_exists(active.pid) {
-            bail!(
-                "session {} is already running with pid {}. Stop it first.",
-                active.session_id,
-                active.pid
-            );
-        }
-        fs::remove_file(&paths.active_session_path).ok();
+    let mut repo = Repository::open(&paths)?;
+    reconcile_active_session(&mut repo)?;
+    if let Some(active) = repo.active_session()? {
+        bail!(
+            "session {} is already running with pid {}. Stop it first.",
+            active.snapshot.session_id,
+            active
+                .runtime
+                .map(|runtime| runtime.pid)
+                .unwrap_or_default()
+        );
     }
 
     let session_id = Uuid::new_v4().simple().to_string();
-    let session = SessionData::new(session_id.clone(), name.clone(), layout);
-    write_session(&paths, &session)?;
+    let snapshot = SessionSnapshot::new(session_id.clone(), name, layout);
+    repo.create_session(&snapshot)?;
 
+    let control_token = Uuid::new_v4().to_string();
     let current_exe = std::env::current_exe().context("discovering current executable")?;
-    let pid = spawn_daemon(&current_exe, &session_id)?;
-    let active = ActiveSession {
-        session_id: session_id.clone(),
-        pid,
-        started_at: session.started_at,
-        layout,
-        name,
-    };
-    write_json(&paths.active_session_path, &active)?;
+    let pid = spawn_daemon(&current_exe, &session_id, &control_token)?;
+    repo.attach_runtime(&session_id, pid, &control_token, Utc::now())?;
 
     println!(
         "Started session {} using {} layout.",
@@ -70,51 +67,69 @@ fn start_session(name: Option<String>, layout: KeyboardLayout) -> Result<()> {
 
 fn status_session() -> Result<()> {
     let paths = app_paths()?;
-    let Some(active) = read_active_session(&paths)? else {
-        println!("No active session.");
-        return Ok(());
-    };
+    let mut repo = Repository::open(&paths)?;
+    reconcile_active_session(&mut repo)?;
 
-    let session = read_session(&paths, &active.session_id)?;
-    let state = if process_exists(active.pid) {
-        "running"
+    if let Some(active) = repo.active_session()? {
+        print_session_status(&active);
+        return Ok(());
+    }
+
+    let recent = repo.recent_sessions()?;
+    if let Some(last) = recent.first() {
+        println!("No active session.");
+        println!();
+        print_session_summary(last);
     } else {
-        "stale"
-    };
-    println!("Session: {}", active.session_id);
-    println!("State:   {}", state);
-    println!("PID:     {}", active.pid);
-    println!("Started: {}", format_local(session.started_at));
-    println!("Updated: {}", format_local(session.last_updated_at));
-    println!("Total:   {}", session.total_keypresses);
-    println!("Keys:    {}", session.unique_keys);
-    if let Some(error) = session.capture_error {
-        println!("Error:   {}", error);
+        println!("No recorded sessions.");
     }
     Ok(())
 }
 
 fn stop_session(open_report: bool) -> Result<()> {
     let paths = app_paths()?;
-    let active = read_active_session(&paths)?.context("no active session to stop")?;
+    let mut repo = Repository::open(&paths)?;
+    reconcile_active_session(&mut repo)?;
 
-    if process_exists(active.pid) {
-        terminate_process(active.pid)?;
-        thread::sleep(Duration::from_millis(300));
-    }
+    let target = match repo.active_session()? {
+        Some(active) => StopTarget::Running(active),
+        None => match recoverable_session(&repo)? {
+            Some(session) => StopTarget::Recoverable(session),
+            None => bail!("no active or recoverable session to stop"),
+        },
+    };
 
-    let mut session = read_session(&paths, &active.session_id)?;
-    session.stopped_at = Some(Utc::now());
-    session.last_updated_at = Utc::now();
+    let session_id = match target {
+        StopTarget::Running(record) => stop_running_session(&paths, record)?,
+        StopTarget::Recoverable(record) => {
+            repo.mark_session_stopped(&record.snapshot.session_id, Utc::now(), false)?;
+            record.snapshot.session_id
+        }
+    };
 
-    let report_path = report_path(&paths, &session.session_id);
-    fs::write(&report_path, build_html_report(&session)).context("writing report")?;
-    session.report_path = Some(report_path.to_string_lossy().to_string());
-    write_session(&paths, &session)?;
-    fs::remove_file(&paths.active_session_path).ok();
+    let mut repo = Repository::open(&paths)?;
+    let snapshot = repo.load_session_snapshot(&session_id)?;
+    let report_path = report_path(&paths, &session_id);
+    fs::create_dir_all(
+        report_path
+            .parent()
+            .context("resolving report parent directory")?,
+    )
+    .context("creating report directory")?;
+    fs::write(&report_path, build_html_report(&snapshot)).context("writing report")?;
+    repo.update_report_path(&session_id, &report_path)?;
 
-    println!("Stopped session {}", session.session_id);
-    println!("Total keypresses: {}", session.total_keypresses);
+    let final_record = repo.load_session(&session_id)?;
+    println!("Stopped session {}", session_id);
+    println!(
+        "Total keypresses: {}",
+        final_record.snapshot.total_keypresses
+    );
+    println!("Outcome: {}", final_record.snapshot.status.as_str());
+    println!(
+        "Clean shutdown: {}",
+        yes_no(final_record.snapshot.clean_shutdown)
+    );
     println!("Report: {}", report_path.display());
     if open_report {
         open_path(&report_path)?;
@@ -124,11 +139,17 @@ fn stop_session(open_report: bool) -> Result<()> {
 
 fn render_existing_report(session_id: &str, open_report: bool) -> Result<()> {
     let paths = app_paths()?;
-    let mut session = read_session(&paths, session_id)?;
+    let mut repo = Repository::open(&paths)?;
+    let snapshot = repo.load_session_snapshot(session_id)?;
     let report_path = report_path(&paths, session_id);
-    fs::write(&report_path, build_html_report(&session)).context("writing report")?;
-    session.report_path = Some(report_path.to_string_lossy().to_string());
-    write_session(&paths, &session)?;
+    fs::create_dir_all(
+        report_path
+            .parent()
+            .context("resolving report parent directory")?,
+    )
+    .context("creating report directory")?;
+    fs::write(&report_path, build_html_report(&snapshot)).context("writing report")?;
+    repo.update_report_path(session_id, &report_path)?;
     println!("Report: {}", report_path.display());
     if open_report {
         open_path(&report_path)?;
@@ -138,79 +159,125 @@ fn render_existing_report(session_id: &str, open_report: bool) -> Result<()> {
 
 fn list_sessions() -> Result<()> {
     let paths = app_paths()?;
-    let mut sessions = Vec::new();
-    if paths.sessions_dir.exists() {
-        for entry in fs::read_dir(&paths.sessions_dir).context("reading sessions directory")? {
-            let entry = entry?;
-            let path = entry.path().join("session.json");
-            if path.exists() {
-                if let Ok(session) = read_json::<SessionData>(&path) {
-                    sessions.push(session);
-                }
-            }
-        }
-    }
-    sessions.sort_by_key(|session| session.started_at);
-    sessions.reverse();
+    let mut repo = Repository::open(&paths)?;
+    reconcile_active_session(&mut repo)?;
+    let sessions = repo.recent_sessions()?;
     if sessions.is_empty() {
         println!("No recorded sessions.");
         return Ok(());
     }
+
     for session in sessions {
         let finished = session
+            .snapshot
             .stopped_at
             .map(format_local)
-            .unwrap_or_else(|| "running".to_string());
+            .unwrap_or_else(|| "n/a".to_string());
         println!(
-            "{}  {:>8} keys  started {}  {}",
-            session.session_id,
-            session.total_keypresses,
-            format_local(session.started_at),
+            "{}  {:>8} keys  {:>11}  started {}  stopped {}",
+            session.snapshot.session_id,
+            session.snapshot.total_keypresses,
+            session.snapshot.status.as_str(),
+            format_local(session.snapshot.started_at),
             finished
         );
     }
     Ok(())
 }
 
-fn daemon_loop(session_id: &str) -> Result<()> {
+fn doctor() -> Result<()> {
     let paths = app_paths()?;
-    let session = read_session(&paths, session_id)?;
-    let state = Arc::new(Mutex::new(CollectorState::new(session)));
+    let mut repo = Repository::open(&paths)?;
+    reconcile_active_session(&mut repo)?;
 
-    {
-        let flush_state = Arc::clone(&state);
-        let flush_paths = paths.clone();
-        thread::spawn(move || {
-            loop {
-                thread::sleep(Duration::from_secs(1));
-                let snapshot = {
-                    let mut guard = flush_state.lock().expect("collector state poisoned");
-                    if !guard.dirty {
-                        None
-                    } else {
-                        guard.session.unique_keys = guard.session.key_counts.len();
-                        guard.dirty = false;
-                        Some(guard.session.clone())
-                    }
-                };
-                if let Some(snapshot) = snapshot {
-                    let _ = write_session(&flush_paths, &snapshot);
-                }
-            }
-        });
+    println!("Database: {}", paths.db_path.display());
+    println!("App data root: {}", paths.root.display());
+    println!("Schema version: {}", repo.schema_version()?);
+    println!(
+        "Sessions directory: {} ({})",
+        paths.sessions_dir.display(),
+        yes_no(paths.sessions_dir.exists())
+    );
+    println!(
+        "Executable available: {}",
+        yes_no(std::env::current_exe().is_ok())
+    );
+    println!("Capture backend: global keyboard hook via rdev");
+    println!(
+        "Platform support: {}",
+        if cfg!(windows) {
+            "windows-primary"
+        } else {
+            "experimental"
+        }
+    );
+    if let Some(active) = repo.active_session()? {
+        let runtime = active.runtime.context("active session runtime missing")?;
+        println!("Active session: {}", active.snapshot.session_id);
+        println!("Active pid: {}", runtime.pid);
+        println!(
+            "Daemon started: {}",
+            format_local(runtime.daemon_started_at)
+        );
+        println!("Daemon alive: {}", yes_no(process_exists(runtime.pid)));
+        println!(
+            "Control channel: {}",
+            runtime
+                .control_port
+                .map(|port| port.to_string())
+                .unwrap_or_else(|| "pending".to_string())
+        );
+    } else {
+        println!("Active session: none");
     }
+    Ok(())
+}
+
+fn daemon_loop(session_id: &str, control_token: &str) -> Result<()> {
+    let paths = app_paths()?;
+    let mut repo = Repository::open(&paths)?;
+    let record = repo.load_session(session_id)?;
+    let flush_seq = record
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.flush_seq)
+        .unwrap_or(0);
+    let state = Arc::new(Mutex::new(load_collector_state(
+        &record.snapshot,
+        flush_seq,
+    )));
+
+    let port = start_control_server(
+        paths.clone(),
+        Arc::clone(&state),
+        DaemonContext {
+            session_id: session_id.to_string(),
+            control_token: control_token.to_string(),
+        },
+    )?;
+    repo.set_runtime_port(session_id, port)?;
+    let _flush_worker = start_flush_worker(paths.clone(), Arc::clone(&state));
 
     let capture_state = Arc::clone(&state);
     let result = listen(move |event| {
-        let _ = handle_event(&capture_state, event);
+        handle_event(&capture_state, event);
     });
 
     if let Err(error) = result {
-        let mut guard = state.lock().expect("collector state poisoned");
-        guard.session.capture_error = Some(format!("{error:?}"));
-        guard.session.last_updated_at = Utc::now();
-        guard.session.unique_keys = guard.session.key_counts.len();
-        write_session(&paths, &guard.session)?;
+        {
+            let mut guard = state.lock().expect("collector state poisoned");
+            guard.capture_error = Some(format!("{error:?}"));
+            guard.dirty = true;
+        }
+        let mut repo = Repository::open(&paths)?;
+        let (flush_seq, flush) = {
+            let mut guard = state.lock().expect("collector state poisoned");
+            guard.flush_seq += 1;
+            guard.dirty = false;
+            (guard.flush_seq, guard.snapshot())
+        };
+        repo.flush_session(session_id, flush_seq, &flush)?;
+        repo.mark_session_failed(session_id, &format!("{error:?}"))?;
         bail!(
             "capture backend failed for session {}: {:?}",
             session_id,
@@ -220,86 +287,148 @@ fn daemon_loop(session_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn handle_event(state: &Arc<Mutex<CollectorState>>, event: Event) -> Result<()> {
-    let mut guard = state.lock().expect("collector state poisoned");
-    match event.event_type {
-        EventType::KeyPress(key) => {
-            let key_id = format!("{key:?}");
-            if guard.pressed_keys.insert(key_id.clone()) {
-                let minute_bucket = Utc::now().format("%Y-%m-%d %H:%M").to_string();
-                *guard.session.key_counts.entry(key_id).or_insert(0) += 1;
-                *guard
-                    .session
-                    .minute_buckets
-                    .entry(minute_bucket)
-                    .or_insert(0) += 1;
-                guard.session.total_keypresses += 1;
-                guard.session.last_updated_at = Utc::now();
-                guard.session.unique_keys = guard.session.key_counts.len();
-                guard.dirty = true;
+enum StopTarget {
+    Running(SessionRecord),
+    Recoverable(SessionRecord),
+}
+
+fn stop_running_session(paths: &AppPaths, record: SessionRecord) -> Result<String> {
+    let runtime = record.runtime.context("active session runtime missing")?;
+    if let Some(port) = runtime.control_port {
+        match send_control_command(port, &runtime.control_token, "stop") {
+            Ok(_) => {
+                for _ in 0..10 {
+                    if !process_exists(runtime.pid) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                return Ok(record.snapshot.session_id);
+            }
+            Err(error) => {
+                if !process_exists(runtime.pid) {
+                    let mut repo = Repository::open(paths)?;
+                    repo.mark_session_interrupted(
+                        &record.snapshot.session_id,
+                        Some(&format!("daemon exited during stop: {error}")),
+                    )?;
+                    repo.mark_session_stopped(&record.snapshot.session_id, Utc::now(), false)?;
+                    return Ok(record.snapshot.session_id);
+                }
+                bail!("graceful shutdown failed: {error}");
             }
         }
-        EventType::KeyRelease(key) => {
-            guard.pressed_keys.remove(&format!("{key:?}"));
+    }
+
+    if process_exists(runtime.pid) {
+        bail!("daemon control channel is not ready yet; retry stop in a moment");
+    }
+
+    let mut repo = Repository::open(paths)?;
+    repo.mark_session_interrupted(
+        &record.snapshot.session_id,
+        Some("daemon exited unexpectedly"),
+    )?;
+    repo.mark_session_stopped(&record.snapshot.session_id, Utc::now(), false)?;
+    Ok(record.snapshot.session_id)
+}
+
+fn recoverable_session(repo: &Repository) -> Result<Option<SessionRecord>> {
+    let sessions = repo.recent_sessions()?;
+    Ok(sessions.into_iter().find(|session| {
+        session.snapshot.status == SessionStatus::Interrupted
+            && session.snapshot.stopped_at.is_none()
+    }))
+}
+
+fn reconcile_active_session(repo: &mut Repository) -> Result<()> {
+    if let Some(active) = repo.active_session()? {
+        match active.runtime {
+            Some(runtime) if process_exists(runtime.pid) => {}
+            Some(_) | None => {
+                repo.mark_session_interrupted(
+                    &active.snapshot.session_id,
+                    Some("daemon process not running; session recovered from sqlite state"),
+                )?;
+            }
         }
-        _ => {}
     }
     Ok(())
 }
 
-fn app_paths() -> Result<AppPaths> {
-    let dirs = ProjectDirs::from("local", "keystroke", "visualizer")
-        .context("unable to resolve a writable application data directory")?;
-    let root = dirs.data_local_dir().to_path_buf();
-    let sessions_dir = root.join("sessions");
-    fs::create_dir_all(&sessions_dir).context("creating data directories")?;
-    Ok(AppPaths {
-        sessions_dir,
-        active_session_path: root.join("active-session.json"),
-    })
-}
-
-fn session_dir(paths: &AppPaths, session_id: &str) -> PathBuf {
-    paths.sessions_dir.join(session_id)
-}
-
-fn session_file_path(paths: &AppPaths, session_id: &str) -> PathBuf {
-    session_dir(paths, session_id).join("session.json")
-}
-
 fn report_path(paths: &AppPaths, session_id: &str) -> PathBuf {
-    session_dir(paths, session_id).join("report.html")
+    paths.sessions_dir.join(session_id).join("report.html")
 }
 
-fn read_active_session(paths: &AppPaths) -> Result<Option<ActiveSession>> {
-    if !paths.active_session_path.exists() {
-        return Ok(None);
+fn print_session_status(record: &SessionRecord) {
+    println!("Session: {}", record.snapshot.session_id);
+    println!("State:   {}", record.snapshot.status.as_str());
+    println!(
+        "PID:     {}",
+        record
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.pid.to_string())
+            .unwrap_or_else(|| "n/a".to_string())
+    );
+    println!("Started: {}", format_local(record.snapshot.started_at));
+    println!("Updated: {}", format_local(record.snapshot.last_updated_at));
+    println!(
+        "Flushed: {}",
+        record
+            .snapshot
+            .last_flush_at
+            .map(format_local)
+            .unwrap_or_else(|| "never".to_string())
+    );
+    println!("Total:   {}", record.snapshot.total_keypresses);
+    println!("Keys:    {}", record.snapshot.unique_keys);
+    println!("Clean:   {}", yes_no(record.snapshot.clean_shutdown));
+    if let Some(runtime) = &record.runtime {
+        println!("Runtime: session {}", runtime.session_id);
+        println!("Spawned: {}", format_local(runtime.daemon_started_at));
+        println!(
+            "Health:  control {} / heartbeat {}",
+            runtime
+                .control_port
+                .map(|port| port.to_string())
+                .unwrap_or_else(|| "pending".to_string()),
+            runtime
+                .heartbeat_at
+                .map(format_local)
+                .unwrap_or_else(|| "never".to_string())
+        );
     }
-    Ok(Some(read_json(&paths.active_session_path)?))
+    if let Some(error) = &record.snapshot.capture_error {
+        println!("Error:   {}", error);
+    }
 }
 
-fn read_session(paths: &AppPaths, session_id: &str) -> Result<SessionData> {
-    read_json(&session_file_path(paths, session_id))
-}
-
-fn write_session(paths: &AppPaths, session: &SessionData) -> Result<()> {
-    let session_dir = session_dir(paths, &session.session_id);
-    fs::create_dir_all(&session_dir).context("creating session directory")?;
-    write_json(&session_file_path(paths, &session.session_id), session)
-}
-
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
-}
-
-fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let text = serde_json::to_string_pretty(value).context("serializing json")?;
-    fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+fn print_session_summary(record: &SessionRecord) {
+    println!("Session: {}", record.snapshot.session_id);
+    println!("State:   {}", record.snapshot.status.as_str());
+    println!("Started: {}", format_local(record.snapshot.started_at));
+    println!(
+        "Stopped: {}",
+        record
+            .snapshot
+            .stopped_at
+            .map(format_local)
+            .unwrap_or_else(|| "n/a".to_string())
+    );
+    println!("Total:   {}", record.snapshot.total_keypresses);
+    println!("Clean:   {}", yes_no(record.snapshot.clean_shutdown));
+    if let Some(error) = &record.snapshot.capture_error {
+        println!("Error:   {}", error);
+    }
 }
 
 fn format_local(dt: chrono::DateTime<Utc>) -> String {
     dt.with_timezone(&Local)
         .format("%Y-%m-%d %H:%M:%S")
         .to_string()
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }

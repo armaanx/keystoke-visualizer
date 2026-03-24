@@ -1,7 +1,9 @@
 mod app;
+mod collector;
 mod model;
 mod platform;
 mod report;
+mod storage;
 
 use anyhow::Result;
 use app::run;
@@ -40,9 +42,12 @@ pub enum Commands {
         open: bool,
     },
     List,
+    Doctor,
     #[command(hide = true)]
     Daemon {
         #[arg(long)]
         session_id: String,
+        #[arg(long)]
+        control_token: String,
     },
 }
