@@ -15,6 +15,7 @@ Local-first CLI tool for recording keyboard activity in a session and serving a 
   - activity timeline
   - top-key distribution
   - keyboard heatmap
+  - derived ergonomic indicators such as dominant hand, hot zone, and fatigue score
   - detailed per-key analytics
   - recent session history
   - data-integrity/status panel
@@ -67,4 +68,5 @@ Cargo builds and runs automatically invoke `pnpm install` and `pnpm build` throu
 - `live` requires an active session. If no session is currently running, it exits with a clear error.
 - Live mode reads from the same flushed SQLite session snapshots used by reports; it does not read directly from daemon memory.
 - The current web UI is focused on single-session analytics plus read-only recent-session history.
+- Fatigue scoring is currently a derived heuristic built from local session activity patterns and correction behavior.
 - Linux and macOS still need deeper platform verification. The integrated web report flow was compiled and smoke-tested on Windows in this workspace.
