@@ -1,2 +1,13 @@
 /target
-ui/node_modules
+/stitch/
+
+# Local editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.suo
+*.sw?
+
+# Frontend workspace dependencies
+/ui/node_modules/
+/docs

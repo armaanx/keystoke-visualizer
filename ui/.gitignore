@@ -7,9 +7,13 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# This repo commits ui/dist intentionally because the Rust binary embeds it.
+# Keep local dependency caches and alternate package-manager lockfiles out of Git.
 node_modules
 dist-ssr
 *.local
+pnpm-lock.yaml
+.pnpm-store/
 
 # Editor directories and files
 .vscode/*

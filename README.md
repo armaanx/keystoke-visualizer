@@ -38,6 +38,8 @@ npm run build
 ```
 
 Rust serves the built assets from `ui/dist` and embeds them into the binary for the integrated report flow.
+`ui/dist` is committed on purpose so a fresh clone can build and run the Rust app without requiring an immediate frontend build step.
+This repo uses the `npm` lockfile in `ui/package-lock.json`; alternate lockfiles such as `ui/pnpm-lock.yaml` are treated as local-only.
 
 ## Notes
 
