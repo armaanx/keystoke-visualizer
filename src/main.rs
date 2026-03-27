@@ -44,6 +44,10 @@ pub enum Commands {
         #[arg(long)]
         open: bool,
     },
+    Live {
+        #[arg(long)]
+        open: bool,
+    },
     List,
     Doctor,
     #[command(hide = true)]

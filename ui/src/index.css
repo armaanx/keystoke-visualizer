@@ -334,6 +334,34 @@ th,
   background: rgba(255, 255, 255, 0.1);
 }
 
+.live-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 0.56rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.live-chip-connected {
+  background: rgba(82, 255, 171, 0.16);
+  color: #8dffbf;
+}
+
+.live-chip-connecting {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+.live-chip-reconnecting {
+  background: rgba(255, 196, 91, 0.14);
+  color: #ffd27d;
+}
+
 .status-chip-running,
 .status-chip-stopped {
   color: var(--text);

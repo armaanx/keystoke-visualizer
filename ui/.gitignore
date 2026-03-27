@@ -8,12 +8,12 @@ pnpm-debug.log*
 lerna-debug.log*
 
 # This repo commits ui/dist intentionally because the Rust binary embeds it.
-# Keep local dependency caches and alternate package-manager lockfiles out of Git.
+# Keep local dependency caches and npm-only artifacts out of Git.
 node_modules
 dist-ssr
 *.local
-pnpm-lock.yaml
 .pnpm-store/
+package-lock.json
 
 # Editor directories and files
 .vscode/*

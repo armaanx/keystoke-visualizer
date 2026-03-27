@@ -6,7 +6,7 @@ use crate::assets::load_asset;
 use crate::model::{KeyboardLayout, SessionRecord, SessionSnapshot, SessionStatus};
 use crate::platform::{process_exists, spawn_daemon};
 use crate::storage::{AppPaths, Repository, app_paths};
-use crate::web::serve_report_ui;
+use crate::web::{UiMode, serve_session_ui};
 use crate::{Cli, Commands};
 use anyhow::{Context, Result, bail};
 use chrono::{Local, Utc};
@@ -22,6 +22,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Status => status_session(),
         Commands::Stop { open } => stop_session(open),
         Commands::Report { session_id, open } => render_existing_report(&session_id, open),
+        Commands::Live { open } => render_live_ui(open),
         Commands::List => list_sessions(),
         Commands::Doctor => doctor(),
         Commands::Daemon {
@@ -119,7 +120,7 @@ fn stop_session(open_report: bool) -> Result<()> {
         yes_no(final_record.snapshot.clean_shutdown)
     );
     if open_report {
-        serve_report_ui(paths, &session_id, true)?;
+        serve_session_ui(paths, UiMode::Report, &session_id, true)?;
     } else {
         println!("Run `keystroke-visualizer report {session_id} --open` to view the UI.");
     }
@@ -129,7 +130,17 @@ fn stop_session(open_report: bool) -> Result<()> {
 fn render_existing_report(session_id: &str, open_report: bool) -> Result<()> {
     let paths = app_paths()?;
     Repository::open(&paths)?.load_session_snapshot(session_id)?;
-    serve_report_ui(paths, session_id, open_report)
+    serve_session_ui(paths, UiMode::Report, session_id, open_report)
+}
+
+fn render_live_ui(open_browser: bool) -> Result<()> {
+    let paths = app_paths()?;
+    let mut repo = Repository::open(&paths)?;
+    reconcile_active_session(&mut repo)?;
+    let active = repo
+        .active_session()?
+        .context("no active session to open in live mode")?;
+    serve_session_ui(paths, UiMode::Live, &active.snapshot.session_id, open_browser)
 }
 
 fn list_sessions() -> Result<()> {

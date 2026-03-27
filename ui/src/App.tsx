@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 
 type ReportResponse = {
@@ -55,6 +55,8 @@ type HistoryEntry = {
 type ApiError = {
   error: string;
 };
+
+type LiveConnectionState = "connecting" | "connected" | "reconnecting";
 
 type TimelineBar = {
   key: string;
@@ -114,6 +116,7 @@ function App() {
       <Routes>
         <Route path="/" element={<HomeRedirect />} />
         <Route path="/reports/:sessionId" element={<ReportPage />} />
+        <Route path="/live/:sessionId" element={<LivePage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
@@ -152,11 +155,11 @@ function HomeRedirect() {
     };
   }, [location.search, navigate, token]);
 
-  if (loading) return <Shell><LoadingState /></Shell>;
-  if (error) return <Shell><ErrorState message={error} /></Shell>;
+  if (loading) return <Shell mode="report"><LoadingState /></Shell>;
+  if (error) return <Shell mode="report"><ErrorState message={error} /></Shell>;
   if (!hasData) {
     return (
-      <Shell>
+      <Shell mode="report">
         <EmptyState title="No recorded sessions yet" message="Start and stop a keystroke session from the CLI, then reopen the report UI." />
       </Shell>
     );
@@ -167,14 +170,16 @@ function HomeRedirect() {
 function ReportPage() {
   const { sessionId = "" } = useParams();
   const token = useToken();
+  return <ReportPageContent key={`${sessionId}:${token}`} sessionId={sessionId} token={token} />;
+}
+
+function ReportPageContent({ sessionId, token }: { sessionId: string; token: string }) {
   const [data, setData] = useState<ReportResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
 
     fetchJson<ReportResponse>(`/api/sessions/${sessionId}/report?token=${token}`)
       .then((report) => {
@@ -195,21 +200,85 @@ function ReportPage() {
     };
   }, [sessionId, token]);
 
-  if (loading) return <Shell><LoadingState /></Shell>;
-  if (error) return <Shell><ErrorState message={error} /></Shell>;
+  if (loading) return <Shell mode="report"><LoadingState /></Shell>;
+  if (error) return <Shell mode="report"><ErrorState message={error} /></Shell>;
   if (!data) {
     return (
-      <Shell>
+      <Shell mode="report">
         <EmptyState title="Session not found" message="The requested session could not be loaded from the local SQLite store." />
       </Shell>
     );
   }
 
-  return <Shell><Dashboard report={data} /></Shell>;
+  return <Shell mode="report"><Dashboard report={data} mode="report" /></Shell>;
 }
 
-function Dashboard({ report }: { report: ReportResponse }) {
+function LivePage() {
+  const { sessionId = "" } = useParams();
+  const token = useToken();
+  return <LivePageContent key={`${sessionId}:${token}`} sessionId={sessionId} token={token} />;
+}
+
+function LivePageContent({ sessionId, token }: { sessionId: string; token: string }) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { data, error, loading, connectionState, lastMessageAt } = useLiveReport(sessionId, token);
+
+  useEffect(() => {
+    if (data && data.session.status !== "running") {
+      navigate(`/reports/${sessionId}${location.search}`, { replace: true });
+    }
+  }, [data, location.search, navigate, sessionId]);
+
+  if (loading) {
+    return (
+      <Shell mode="live">
+        <LoadingState title="Connecting live session" message="Opening the live stream and waiting for the first server snapshot." />
+      </Shell>
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <Shell mode="live">
+        <ErrorState message={error} />
+      </Shell>
+    );
+  }
+
+  if (!data) {
+    return (
+      <Shell mode="live">
+        <EmptyState title="Live session unavailable" message="The active session could not be loaded from the local store." />
+      </Shell>
+    );
+  }
+
+  return (
+    <Shell mode="live">
+      <Dashboard
+        report={data}
+        mode="live"
+        liveState={{ connectionState, lastMessageAt }}
+      />
+    </Shell>
+  );
+}
+
+function Dashboard({
+  report,
+  mode,
+  liveState,
+}: {
+  report: ReportResponse;
+  mode: "report" | "live";
+  liveState?: {
+    connectionState: LiveConnectionState;
+    lastMessageAt: number | null;
+  };
+}) {
   const [showAllRows, setShowAllRows] = useState(false);
+  const liveNow = useLiveTicker(mode === "live" && report.session.status === "running");
   const topKeys = report.key_usage.slice(0, 4);
   const tableItems = showAllRows ? report.key_usage : report.key_usage.slice(0, 25);
   const timelineBars = useMemo(() => buildTimelineBars(report.activity, 20), [report.activity]);
@@ -217,6 +286,11 @@ function Dashboard({ report }: { report: ReportResponse }) {
   const dominantHand = useMemo(() => computeDominantHand(report.keyboard.keys), [report.keyboard.keys]);
   const hotZone = useMemo(() => computeHotZone(report.keyboard.keys), [report.keyboard.keys]);
   const fatigueIndicator = useMemo(() => computeFatigueIndicator(report.key_usage), [report.key_usage]);
+  const liveLabel = mode === "live" ? formatLiveConnectionLabel(liveState?.connectionState ?? "connecting", liveState?.lastMessageAt ?? null, liveNow) : null;
+  const displayedDuration =
+    mode === "live" && report.session.status === "running"
+      ? formatLiveDuration(report.session.started_at, liveNow)
+      : formatClockDuration(report.session.duration_seconds);
 
   return (
     <div className="report-page">
@@ -225,12 +299,19 @@ function Dashboard({ report }: { report: ReportResponse }) {
           <div className="hero-meta-row">
             <span className={`status-chip status-chip-${report.session.status}`}>{formatStatusLabel(report.session.status)}</span>
             <span className="hero-session-id">ID: {report.session.session_id.slice(0, 12)}</span>
+            {mode === "live" ? (
+              <span className={`live-chip live-chip-${liveState?.connectionState ?? "connecting"}`}>{liveLabel}</span>
+            ) : null}
           </div>
           <h1 className="hero-title">{report.session.session_name ?? `Session ${report.session.session_id.slice(0, 8)}`}</h1>
-          <p className="hero-description">Recorded session analyzing temporal typing intensity and ergonomic patterns. Data is processed locally with aggregate counts only and no raw keystroke content retained.</p>
+          <p className="hero-description">
+            {mode === "live"
+              ? "Streaming local session telemetry from the current active capture. Aggregate counts refresh automatically and no raw keystroke content is retained."
+              : "Recorded session analyzing temporal typing intensity and ergonomic patterns. Data is processed locally with aggregate counts only and no raw keystroke content retained."}
+          </p>
         </div>
         <div className="hero-stats">
-          <MetricReadout label="Session Duration" value={formatClockDuration(report.session.duration_seconds)} />
+          <MetricReadout label="Session Duration" value={displayedDuration} />
           <div className="hero-divider" />
           <MetricReadout label="Safety Index" value={safetyIndex} />
         </div>
@@ -299,11 +380,11 @@ function Dashboard({ report }: { report: ReportResponse }) {
   );
 }
 
-function Shell({ children }: { children: ReactNode }) {
+function Shell({ children, mode }: { children: ReactNode; mode: "report" | "live" }) {
   return (
     <div className="app-shell">
       <TopBar />
-      <SideRail />
+      <SideRail mode={mode} />
       <main className="app-main"><div className="content-canvas">{children}</div></main>
       <MobileNav />
     </div>
@@ -329,7 +410,7 @@ function TopBar() {
   );
 }
 
-function SideRail() {
+function SideRail({ mode }: { mode: "report" | "live" }) {
   return (
     <aside className="siderail">
       <div className="siderail-brand">
@@ -337,8 +418,8 @@ function SideRail() {
         <div className="siderail-subtitle">Local-First Encryption</div>
       </div>
       <nav className="siderail-nav">
-        <SideNavItem label="Dashboard" />
-        <SideNavItem label="Live Stream" active />
+        <SideNavItem label="Dashboard" active={mode === "report"} />
+        <SideNavItem label="Live Stream" active={mode === "live"} />
         <SideNavItem label="Heatmaps" />
         <SideNavItem label="Privacy Logs" />
         <SideNavItem label="Export" />
@@ -555,8 +636,14 @@ function RankBadge({ index, count, maxCount }: { index: number; count: number; m
   return <span className="rank-indicator rank-indicator-neutral"><MinusIcon />#{index + 1}</span>;
 }
 
-function LoadingState() {
-  return <div className="state-card"><div className="state-spinner" /><h2>Loading local report</h2><p>Reading session data from the Rust backend and reconstructing the analytics canvas.</p></div>;
+function LoadingState({
+  title = "Loading local report",
+  message = "Reading session data from the Rust backend and reconstructing the analytics canvas.",
+}: {
+  title?: string;
+  message?: string;
+}) {
+  return <div className="state-card"><div className="state-spinner" /><h2>{title}</h2><p>{message}</p></div>;
 }
 
 function ErrorState({ message }: { message: string }) {
@@ -569,6 +656,117 @@ function EmptyState({ title, message }: { title: string; message: string }) {
 
 function EmptyInline({ message }: { message: string }) {
   return <div className="empty-inline">{message}</div>;
+}
+
+function useLiveReport(sessionId: string, token: string) {
+  const [data, setData] = useState<ReportResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [connectionState, setConnectionState] = useState<LiveConnectionState>("connecting");
+  const [lastMessageAt, setLastMessageAt] = useState<number | null>(null);
+  const latestStatusRef = useRef<ReportResponse["session"]["status"] | null>(null);
+  const hasPayloadRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let socket: WebSocket | null = null;
+    let retryTimer: number | null = null;
+    let attempts = 0;
+
+    const cleanupSocket = () => {
+      if (socket) {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
+          socket.close();
+        }
+        socket = null;
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (cancelled) return;
+      setConnectionState("reconnecting");
+      const delay = Math.min(1000 * 2 ** attempts, 5000);
+      attempts += 1;
+      retryTimer = window.setTimeout(connect, delay);
+    };
+
+    const connect = () => {
+      if (cancelled) return;
+      cleanupSocket();
+      setConnectionState(hasPayloadRef.current ? "reconnecting" : "connecting");
+      const nextSocket = new WebSocket(buildLiveWebSocketUrl(sessionId, token));
+      socket = nextSocket;
+
+      nextSocket.onopen = () => {
+        if (cancelled) return;
+        setError(null);
+      };
+
+      nextSocket.onmessage = (event) => {
+        if (cancelled) return;
+        try {
+          const payload = JSON.parse(event.data) as ReportResponse;
+          latestStatusRef.current = payload.session.status;
+          hasPayloadRef.current = true;
+          attempts = 0;
+          setData(payload);
+          setLoading(false);
+          setError(null);
+          setConnectionState("connected");
+          setLastMessageAt(Date.now());
+        } catch (reason) {
+          setError(reason instanceof Error ? reason.message : "Failed to parse live update");
+        }
+      };
+
+      nextSocket.onerror = () => {
+        if (cancelled) return;
+        setError("Live connection interrupted");
+      };
+
+      nextSocket.onclose = () => {
+        if (cancelled) return;
+        cleanupSocket();
+        if (latestStatusRef.current === "running" || latestStatusRef.current === null) {
+          scheduleReconnect();
+        }
+      };
+    };
+
+    latestStatusRef.current = null;
+    hasPayloadRef.current = false;
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      cleanupSocket();
+    };
+  }, [sessionId, token]);
+
+  return { data, error, loading, connectionState, lastMessageAt };
+}
+
+function useLiveTicker(enabled: boolean) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!enabled) return;
+
+    const timer = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [enabled]);
+
+  return now;
 }
 
 function useToken() {
@@ -691,6 +889,11 @@ function escapeCsv(value: string) {
   return value.replaceAll("\n", " ");
 }
 
+function buildLiveWebSocketUrl(sessionId: string, token: string) {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/ws/sessions/${sessionId}/live?token=${encodeURIComponent(token)}`;
+}
+
 function medianOf(values: number[]) {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((left, right) => left - right);
@@ -703,6 +906,21 @@ function formatStatusLabel(value: ReportResponse["session"]["status"]) {
   if (value === "stopped") return "Completed";
   if (value === "interrupted") return "Interrupted";
   return "Failed";
+}
+
+function formatLiveConnectionLabel(connectionState: LiveConnectionState, lastMessageAt: number | null, now: number) {
+  if (connectionState === "reconnecting") return "Reconnecting";
+  if (connectionState === "connecting") return "Connecting";
+  if (!lastMessageAt) return "Live";
+  const ageSeconds = Math.max(0, Math.round((now - lastMessageAt) / 1000));
+  return ageSeconds <= 1 ? "Live now" : `Live ${ageSeconds}s ago`;
+}
+
+function formatLiveDuration(startedAt: string, now: number) {
+  const started = new Date(startedAt).getTime();
+  if (Number.isNaN(started)) return "00:00:00";
+  const totalSeconds = Math.max(0, Math.floor((now - started) / 1000));
+  return formatClockDuration(totalSeconds);
 }
 
 function formatPrivacyMode(value: string) {
