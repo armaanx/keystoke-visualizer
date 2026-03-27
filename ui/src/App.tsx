@@ -64,6 +64,11 @@ type TimelineBar = {
   representativeBucket: string;
 };
 
+type FatigueAssessment = {
+  label: string;
+  score: number;
+};
+
 type KeyboardTemplateRow = {
   keyId: string;
   label: string;
@@ -285,7 +290,10 @@ function Dashboard({
   const safetyIndex = useMemo(() => calculateSafetyIndex(report.summary.total_keypresses, report.summary.dropped_events, report.session.clean_shutdown), [report.session.clean_shutdown, report.summary.dropped_events, report.summary.total_keypresses]);
   const dominantHand = useMemo(() => computeDominantHand(report.keyboard.keys), [report.keyboard.keys]);
   const hotZone = useMemo(() => computeHotZone(report.keyboard.keys), [report.keyboard.keys]);
-  const fatigueIndicator = useMemo(() => computeFatigueIndicator(report.key_usage), [report.key_usage]);
+  const fatigueAssessment = useMemo(
+    () => computeFatigueAssessment(report.activity, report.key_usage, report.session.duration_seconds),
+    [report.activity, report.key_usage, report.session.duration_seconds],
+  );
   const liveLabel = mode === "live" ? formatLiveConnectionLabel(liveState?.connectionState ?? "connecting", liveState?.lastMessageAt ?? null, liveNow) : null;
   const displayedDuration =
     mode === "live" && report.session.status === "running"
@@ -321,7 +329,7 @@ function Dashboard({
         <KpiCard label="Total Keypresses" value={formatNumber(report.summary.total_keypresses)} accent="strong" detail={report.activity.length > 0 ? `${report.activity.length} minute buckets` : "No minute buckets"} />
         <KpiCard label="Unique Keys" value={String(report.summary.unique_keys)} detail={report.keyboard.layout} />
         <KpiCard label="Peak Minute" value={report.summary.peak_minute ? formatNumber(report.summary.peak_minute) : "n/a"} detail={formatMinuteBucket(report.summary.peak_minute_bucket)} />
-        <KpiCard label="Avg. KPM" value={report.summary.avg_keys_per_minute.toFixed(1)} accent="strong" detail={fatigueIndicator} />
+        <KpiCard label="Avg. KPM" value={report.summary.avg_keys_per_minute.toFixed(1)} accent="strong" detail={`${fatigueAssessment.label} • ${fatigueAssessment.score}/100`} />
       </section>
       <div className="dashboard-grid">
         <div className="primary-column">
@@ -343,7 +351,7 @@ function Dashboard({
             <div className="heatmap-metadata">
               <HeatmapStat label="Primary Hand" value={dominantHand} />
               <HeatmapStat label="Hot Zone" value={hotZone} />
-              <HeatmapStat label="Fatigue Indicator" value={fatigueIndicator} />
+              <HeatmapStat label="Fatigue Indicator" value={`${fatigueAssessment.label} (${fatigueAssessment.score}/100)`} />
             </div>
           </Panel>
         </div>
@@ -850,12 +858,46 @@ function computeHotZone(keys: ReportResponse["keyboard"]["keys"]) {
   return "Home Row - Center";
 }
 
-function computeFatigueIndicator(items: ReportResponse["key_usage"]) {
+function computeFatigueAssessment(
+  activity: ReportResponse["activity"],
+  items: ReportResponse["key_usage"],
+  durationSeconds: number,
+): FatigueAssessment {
+  const sortedActivity = [...activity].sort((left, right) => left.minute_bucket.localeCompare(right.minute_bucket));
+  const counts = sortedActivity.map((point) => point.keypresses);
   const backspace = items.find((item) => item.key_id === "Backspace" || item.display_label.toLowerCase().includes("backspace"));
-  const ratio = backspace?.share_percent ?? 0;
-  if (ratio > 6) return "Elevated";
-  if (ratio > 2.5) return "Moderate";
-  return "Low Threshold";
+  const correctionRate = backspace?.share_percent ?? 0;
+
+  if (counts.length === 0 || durationSeconds < 180) {
+    return {
+      label: correctionRate > 5 ? "Elevated" : "Low",
+      score: clampToWholeNumber(correctionRate * 6, 8, 48),
+    };
+  }
+
+  const average = mean(counts);
+  const earlyWindow = takeWindowAverage(counts, 0, 0.33);
+  const lateWindow = takeWindowAverage(counts, 0.67, 1);
+  const midWindow = takeWindowAverage(counts, 0.33, 0.67);
+  const paceDrop = earlyWindow > 0 ? clamp((earlyWindow - lateWindow) / earlyWindow, 0, 1) : 0;
+  const lateSlump = average > 0 ? clamp((average - lateWindow) / average, 0, 1) : 0;
+  const instability = average > 0 ? clamp(standardDeviation(counts) / average / 1.35, 0, 1) : 0;
+  const recovery = midWindow > 0 && lateWindow > midWindow ? clamp((lateWindow - midWindow) / midWindow, 0, 0.35) : 0;
+
+  const score = clampToWholeNumber(
+    correctionRate * 4.5 +
+      paceDrop * 34 +
+      lateSlump * 24 +
+      instability * 18 -
+      recovery * 18,
+    0,
+    100,
+  );
+
+  if (score >= 75) return { label: "High", score };
+  if (score >= 50) return { label: "Elevated", score };
+  if (score >= 28) return { label: "Moderate", score };
+  return { label: "Low", score };
 }
 
 function pickHeatLevel(intensity: number) {
@@ -899,6 +941,33 @@ function medianOf(values: number[]) {
   const sorted = [...values].sort((left, right) => left - right);
   const midpoint = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 0 ? (sorted[midpoint - 1] + sorted[midpoint]) / 2 : sorted[midpoint];
+}
+
+function mean(values: number[]) {
+  if (values.length === 0) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function standardDeviation(values: number[]) {
+  if (values.length <= 1) return 0;
+  const average = mean(values);
+  const variance = mean(values.map((value) => (value - average) ** 2));
+  return Math.sqrt(variance);
+}
+
+function takeWindowAverage(values: number[], startRatio: number, endRatio: number) {
+  if (values.length === 0) return 0;
+  const start = Math.min(values.length - 1, Math.floor(values.length * startRatio));
+  const end = Math.max(start + 1, Math.ceil(values.length * endRatio));
+  return mean(values.slice(start, Math.min(end, values.length)));
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function clampToWholeNumber(value: number, min: number, max: number) {
+  return Math.round(clamp(value, min, max));
 }
 
 function formatStatusLabel(value: ReportResponse["session"]["status"]) {
